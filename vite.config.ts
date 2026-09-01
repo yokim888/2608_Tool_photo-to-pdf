@@ -7,6 +7,14 @@ import { existsSync, readFileSync } from 'node:fs'; //cloudflare use add
 import { fileURLToPath } from 'node:url';//cloudflare use add
 import { dirname, resolve } from 'node:path';//cloudflare use add
 
+const __dirname = dirname(fileURLToPath(import.meta.url));//cloudflare use add
+const hostingConfigPath = resolve(__dirname, '.openai/hosting.json');//cloudflare use add
+
+const hostingConfig: { d1?: string; r2?: string } = existsSync(hostingConfigPath)//cloudflare use add
+  ? JSON.parse(readFileSync(hostingConfigPath, 'utf-8'))
+  : {};
+
+
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   '00000000-0000-4000-8000-000000000000';
 
