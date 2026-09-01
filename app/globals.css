@@ -54,7 +54,7 @@ h1 { margin: 0; font-family: Georgia, "Noto Serif TC", serif; font-size: clamp(4
 .settings-title { display: flex; justify-content: space-between; align-items: center; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,.16); }
 .settings-title span { font-family: Georgia, "Noto Serif TC", serif; font-size: 22px; font-weight: 700; }
 .settings-title small { color: #b7c5bf; font-size: 10px; }
-.setting-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 18px 0; }
+.setting-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 18px 0; }
 .setting-grid label { display: flex; min-width: 0; flex-direction: column; gap: 7px; }
 .setting-grid label > span { color: #b7c5bf; font-size: 10px; font-weight: 700; }
 .setting-grid input, .setting-grid select { width: 100%; min-height: 44px; padding: 0 11px; border: 1px solid rgba(255,255,255,.15); border-radius: 10px; outline: none; color: #f6f4ef; background: rgba(255,255,255,.08); font-size: 12px; }
