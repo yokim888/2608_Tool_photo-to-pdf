@@ -2,7 +2,10 @@ import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
-import hostingConfig from './.openai/hosting.json';
+//import hostingConfig from './.openai/hosting.json'; //cloudflare use delete
+import { existsSync, readFileSync } from 'node:fs'; //cloudflare use add
+import { fileURLToPath } from 'node:url';//cloudflare use add
+import { dirname, resolve } from 'node:path';//cloudflare use add
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   '00000000-0000-4000-8000-000000000000';
