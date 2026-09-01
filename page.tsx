@@ -6,15 +6,19 @@ import { PDFDocument } from 'pdf-lib';
 type Photo = { id: string; file: File; url: string; rotation: number };
 type PageSize = 'original' | 'a4' | 'letter';
 type Margin = 'none' | 'small' | 'normal';
+type WritableFileHandle = {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+};
 type SaveFilePickerWindow = Window & {
   showSaveFilePicker?: (options: {
     suggestedName: string;
     types: Array<{ description: string; accept: Record<string, string[]> }>;
-  }) => Promise<{
-    createWritable: () => Promise<{
-      write: (data: Blob) => Promise<void>;
-      close: () => Promise<void>;
-    }>;
+  }) => Promise<WritableFileHandle>;
+  showDirectoryPicker?: () => Promise<{
+    getFileHandle: (name: string, options: { create: boolean }) => Promise<WritableFileHandle>;
   }>;
 };
 
@@ -38,6 +42,48 @@ function safeBaseName(name: string) {
   return name.trim().replace(/[\\/:*?"<>|]/g, '-').replace(/\.pdf$/i, '') || '照片';
 }
 
+async function combineSinglePagePdfs(singlePages: Uint8Array[]) {
+  if (singlePages.length === 1) return singlePages[0];
+  const combined = await PDFDocument.create();
+  for (const singlePage of singlePages) {
+    const source = await PDFDocument.load(singlePage);
+    const [page] = await combined.copyPages(source, [0]);
+    combined.addPage(page);
+  }
+  return combined.save({ useObjectStreams: true });
+}
+
+async function splitSinglePagePdfs(singlePages: Uint8Array[], maxBytes: number) {
+  const estimatedGroups: Uint8Array[][] = [];
+  let currentGroup: Uint8Array[] = [];
+  let currentBytes = 0;
+
+  for (const singlePage of singlePages) {
+    if (currentGroup.length && currentBytes + singlePage.length > maxBytes) {
+      estimatedGroups.push(currentGroup);
+      currentGroup = [];
+      currentBytes = 0;
+    }
+    currentGroup.push(singlePage);
+    currentBytes += singlePage.length;
+  }
+  if (currentGroup.length) estimatedGroups.push(currentGroup);
+
+  const fitGroup = async (group: Uint8Array[]): Promise<Uint8Array[]> => {
+    const combined = await combineSinglePagePdfs(group);
+    if (combined.length <= maxBytes || group.length === 1) return [combined];
+    const middle = Math.ceil(group.length / 2);
+    return [
+      ...await fitGroup(group.slice(0, middle)),
+      ...await fitGroup(group.slice(middle)),
+    ];
+  };
+
+  const outputs: Uint8Array[] = [];
+  for (const group of estimatedGroups) outputs.push(...await fitGroup(group));
+  return outputs;
+}
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const photosRef = useRef<Photo[]>([]);
@@ -46,6 +92,7 @@ export default function Home() {
   const [margin, setMargin] = useState<Margin>('small');
   const [quality, setQuality] = useState('0.62');
   const [fileName, setFileName] = useState('我的照片');
+  const [splitSizeMb, setSplitSizeMb] = useState('');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
   const [message, setMessage] = useState('');
@@ -142,11 +189,18 @@ export default function Home() {
 
   const generatePdf = async () => {
     if (!photos.length || busy) return;
+    const requestedSplitMb = splitSizeMb.trim() === '' ? 0 : Number(splitSizeMb);
+    if (!Number.isFinite(requestedSplitMb) || requestedSplitMb < 0) {
+      setMessage('單檔上限請輸入 0 或大於 0 的 MB 數值。');
+      return;
+    }
+    const maxFileBytes = requestedSplitMb > 0 ? Math.floor(requestedSplitMb * 1024 * 1024) : null;
     setBusy(true);
     setMessage('');
     let cancelledAction = '處理';
     try {
-      const pdf = await PDFDocument.create();
+      const pdf = maxFileBytes ? null : await PDFDocument.create();
+      const singlePagePdfs: Uint8Array[] = [];
       const jpegQuality = Number(quality);
       const maxSide = jpegQuality >= 0.98
         ? 5200
@@ -179,7 +233,8 @@ export default function Home() {
         context.rotate(photo.rotation * Math.PI / 180);
         context.drawImage(image, -scaledWidth / 2, -scaledHeight / 2, scaledWidth, scaledHeight);
         const jpegData = canvas.toDataURL('image/jpeg', jpegQuality);
-        const embedded = await pdf.embedJpg(jpegData);
+        const targetPdf = pdf ?? await PDFDocument.create();
+        const embedded = await targetPdf.embedJpg(jpegData);
 
         let pageWidth: number;
         let pageHeight: number;
@@ -198,51 +253,76 @@ export default function Home() {
         const fit = Math.min(availableWidth / embedded.width, availableHeight / embedded.height);
         const drawWidth = embedded.width * fit;
         const drawHeight = embedded.height * fit;
-        const page = pdf.addPage([pageWidth, pageHeight]);
+        const page = targetPdf.addPage([pageWidth, pageHeight]);
         page.drawImage(embedded, {
           x: (pageWidth - drawWidth) / 2,
           y: (pageHeight - drawHeight) / 2,
           width: drawWidth,
           height: drawHeight,
         });
+        if (maxFileBytes) singlePagePdfs.push(await targetPdf.save({ useObjectStreams: true }));
         canvas.width = 1;
         canvas.height = 1;
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
 
-      setProgress('正在完成 PDF…');
-      const bytes = await pdf.save({ useObjectStreams: true });
-      const blob = new Blob([bytes as BlobPart], { type: 'application/pdf' });
-      const finalName = `${safeBaseName(fileName)}.pdf`;
-      const outputFile = new File([blob], finalName, { type: 'application/pdf' });
-      const shareData = { files: [outputFile], title: finalName };
+      setProgress(maxFileBytes ? '正在拆分 PDF…' : '正在完成 PDF…');
+      const outputBytes = maxFileBytes
+        ? await splitSinglePagePdfs(singlePagePdfs, maxFileBytes)
+        : [await pdf!.save({ useObjectStreams: true })];
+      const baseName = safeBaseName(fileName);
+      const outputs = outputBytes.map((bytes, index) => {
+        const name = outputBytes.length > 1 ? `${baseName}_第${index + 1}份.pdf` : `${baseName}.pdf`;
+        const blob = new Blob([bytes as BlobPart], { type: 'application/pdf' });
+        return { name, blob, file: new File([blob], name, { type: 'application/pdf' }) };
+      });
+      const shareData = { files: outputs.map((output) => output.file), title: `${baseName}.pdf` };
       const pickerWindow = window as SaveFilePickerWindow;
       const isMobileDevice =
         /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const splitNote = outputs.length > 1 ? `，已拆成 ${outputs.length} 份` : '';
+      const oversizedParts = maxFileBytes ? outputs.filter((output) => output.blob.size > maxFileBytes).length : 0;
+      const oversizedNote = oversizedParts ? `；其中 ${oversizedParts} 份因單頁已超過上限，無法再拆` : '';
 
-      if (!isMobileDevice && pickerWindow.showSaveFilePicker) {
+      if (!isMobileDevice && outputs.length > 1 && pickerWindow.showDirectoryPicker) {
         cancelledAction = '儲存';
-        const handle = await pickerWindow.showSaveFilePicker({
-          suggestedName: finalName,
-          types: [{ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } }],
-        });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        setMessage('PDF 已儲存到你選擇的位置。');
+        const directory = await pickerWindow.showDirectoryPicker();
+        for (const output of outputs) {
+          const handle = await directory.getFileHandle(output.name, { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(output.blob);
+          await writable.close();
+        }
+        setMessage(`PDF 已建立${splitNote}，並儲存到你選擇的資料夾${oversizedNote}。`);
+      } else if (!isMobileDevice && pickerWindow.showSaveFilePicker) {
+        cancelledAction = '儲存';
+        for (const output of outputs) {
+          const handle = await pickerWindow.showSaveFilePicker({
+            suggestedName: output.name,
+            types: [{ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(output.blob);
+          await writable.close();
+        }
+        setMessage(`PDF 已建立${splitNote}，並儲存到你選擇的位置${oversizedNote}。`);
       } else if (isMobileDevice && navigator.share && (!navigator.canShare || navigator.canShare(shareData))) {
         cancelledAction = '分享';
         await navigator.share(shareData);
-        setMessage('PDF 已建立，請在分享選單中選擇儲存位置。');
+        setMessage(`PDF 已建立${splitNote}，請在分享選單中選擇儲存位置${oversizedNote}。`);
       } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = finalName;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 30_000);
-        setMessage('PDF 已建立並開始下載。');
+        outputs.forEach((output, index) => {
+          const url = URL.createObjectURL(output.blob);
+          setTimeout(() => {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = output.name;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 30_000);
+          }, index * 250);
+        });
+        setMessage(`PDF 已建立${splitNote}並開始下載${oversizedNote}。`);
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -318,6 +398,7 @@ export default function Home() {
               <label><span>頁面尺寸</span><select value={pageSize} onChange={(event) => setPageSize(event.target.value as PageSize)}><option value="a4">A4（自動方向）</option><option value="letter">Letter（自動方向）</option><option value="original">依圖片比例</option></select></label>
               <label><span>頁面留白</span><select value={margin} onChange={(event) => setMargin(event.target.value as Margin)}><option value="none">無留白</option><option value="small">窄邊界</option><option value="normal">標準邊界</option></select></label>
               <label><span>圖片畫質</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="0.5">極小檔案（傳送優先）</option><option value="0.62">小檔案（建議）</option><option value="0.78">精簡檔案</option><option value="0.9">平衡畫質</option><option value="1">最高畫質</option></select></label>
+              <label><span>單檔上限（MB）</span><input type="number" min="0" step="0.5" inputMode="decimal" value={splitSizeMb} onChange={(event) => setSplitSizeMb(event.target.value)} placeholder="不限，填 0 也不拆分" /></label>
             </div>
             <button className="make-pdf" type="button" onClick={generatePdf} disabled={busy}>
               <span>{busy ? '處理中' : '建立 PDF'}</span><b>{busy ? progress : `${photos.length} 頁 →`}</b>
